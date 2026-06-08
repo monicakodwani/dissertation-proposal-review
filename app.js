@@ -21,6 +21,7 @@ const state = {
 };
 
 const app = document.querySelector('#app');
+let selectionListenerBound = false;
 
 function readReviewerFeedback() {
   try {
@@ -125,6 +126,18 @@ function setTheme(theme) {
   render();
 }
 
+function themeIcon(theme) {
+  if (theme === 'dark') return '◐';
+  if (theme === 'rose') return '✦';
+  return '☼';
+}
+
+function themeLabel(theme) {
+  if (theme === 'dark') return 'Dark mode';
+  if (theme === 'rose') return 'Rose mode';
+  return 'Light mode';
+}
+
 function toggleCollapse(panel) {
   state.collapsed[panel] = !state.collapsed[panel];
   render();
@@ -169,14 +182,13 @@ function render() {
             <h2>${escapeHtml(chapter.title)}</h2>
           </div>
           <div class="toolbar">
-            <div class="segmented" aria-label="Theme">
-              ${['light', 'dark', 'rose'].map((theme) => `<button class="${state.theme === theme ? 'active' : ''}" data-theme="${theme}">${theme}</button>`).join('')}
+            <div class="segmented icon-segmented" aria-label="Theme">
+              ${['light', 'dark', 'rose'].map((theme) => `<button class="${state.theme === theme ? 'active' : ''}" data-theme="${theme}" title="${themeLabel(theme)}" aria-label="${themeLabel(theme)}">${themeIcon(theme)}</button>`).join('')}
             </div>
-            <button class="icon-button" data-collapse="sidebar" title="Toggle chapter outline">Outline</button>
-            <button class="icon-button" data-collapse="sections" title="Toggle section list">Sections</button>
-            <button class="icon-button" data-collapse="inspector" title="Toggle comments panel">Comments</button>
-            <button class="tool-button" id="export-review">${isStaticReview ? 'Export Feedback' : 'Export'}</button>
-            ${isStaticReview ? '' : '<button class="tool-button secondary" id="export-static">Share Site</button>'}
+            <div class="action-group">
+              <button class="tool-button" id="export-review">${isStaticReview ? 'Export Feedback' : 'Export'}</button>
+              ${isStaticReview ? '' : '<button class="tool-button secondary" id="export-static">Share Site</button>'}
+            </div>
           </div>
         </header>
 
@@ -190,9 +202,10 @@ function render() {
 
         <div class="content-layout">
           <nav class="sections">
-            <div class="panel-head"><p class="eyebrow">In This Tab</p><button class="mini-button" data-collapse="sections">Collapse</button></div>
+            <div class="panel-head"><p class="eyebrow">In This Tab</p></div>
             ${sectionBlocks.map((block) => `<button class="section-link" data-scroll="${block.id}">${escapeHtml(block.title)}</button>`).join('') || '<p class="quiet">No section headings</p>'}
           </nav>
+          <button class="panel-toggle section-toggle" data-collapse="sections" title="${state.collapsed.sections ? 'Show section list' : 'Hide section list'}" aria-label="${state.collapsed.sections ? 'Show section list' : 'Hide section list'}">${state.collapsed.sections ? '›' : '‹'}</button>
           <article class="paper">
             ${chapter.blocks.map((block, index) => renderBlock(block, chapter.blocks[index + 1])).join('')}
           </article>
@@ -202,7 +215,10 @@ function render() {
       <aside class="inspector" id="inspector">
         ${renderInspector(getActiveBlock())}
       </aside>
+      <button class="panel-toggle sidebar-edge" data-collapse="sidebar" title="${state.collapsed.sidebar ? 'Show outline' : 'Hide outline'}" aria-label="${state.collapsed.sidebar ? 'Show outline' : 'Hide outline'}">${state.collapsed.sidebar ? '›' : '‹'}</button>
+      <button class="panel-toggle inspector-edge" data-collapse="inspector" title="${state.collapsed.inspector ? 'Show comments' : 'Hide comments'}" aria-label="${state.collapsed.inspector ? 'Show comments' : 'Hide comments'}">${state.collapsed.inspector ? '‹' : '›'}</button>
     </main>
+    <button class="selection-popover" id="selection-popover" type="button">Comment</button>
     <div class="save-dock" id="save-dock"><span id="dirty-count">0 unsaved edits</span><button class="tool-button" id="save-inline-edits">Save text changes</button></div>
     <div class="toast" id="toast"><span></span></div>
   `;
@@ -377,6 +393,33 @@ function updateInspector() {
   bindCommentActions();
 }
 
+function hideSelectionPopover() {
+  const popover = document.querySelector('#selection-popover');
+  if (!popover) return;
+  popover.classList.remove('show');
+}
+
+function showSelectionPopover(range) {
+  const popover = document.querySelector('#selection-popover');
+  const paper = document.querySelector('.paper');
+  if (!popover || !paper) return;
+  const rect = range.getBoundingClientRect();
+  const paperRect = paper.getBoundingClientRect();
+  const left = Math.min(Math.max(rect.left + rect.width / 2, paperRect.left + 62), paperRect.right - 62);
+  const top = Math.max(rect.top - 44, paperRect.top + 12);
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+  popover.classList.add('show');
+}
+
+function openCommentPanelForSelection() {
+  if (!state.selectedQuote || !state.activeBlockId) return;
+  state.collapsed.inspector = false;
+  render();
+  const noteBox = document.querySelector('#comment-note');
+  if (noteBox) noteBox.focus();
+}
+
 function updateDirtyDock() {
   const dock = document.querySelector('#save-dock');
   const countLabel = document.querySelector('#dirty-count');
@@ -388,18 +431,28 @@ function updateDirtyDock() {
 
 function captureSelection() {
   const selection = window.getSelection();
-  if (!selection || selection.isCollapsed) return;
+  if (!selection || selection.isCollapsed) {
+    hideSelectionPopover();
+    return;
+  }
   const quote = selection.toString().replace(/\s+/g, ' ').trim();
-  if (!quote) return;
+  if (!quote) {
+    hideSelectionPopover();
+    return;
+  }
   let node = selection.anchorNode;
   if (node && node.nodeType === Node.TEXT_NODE) node = node.parentElement;
   const paragraph = node && node.closest ? node.closest('[data-block]') : null;
-  if (!paragraph) return;
+  if (!paragraph) {
+    hideSelectionPopover();
+    return;
+  }
   state.activeBlockId = paragraph.dataset.block;
   state.selectedQuote = quote;
   document.querySelectorAll('.paragraph').forEach((item) => item.classList.remove('active'));
   paragraph.classList.add('active');
   updateInspector();
+  if (selection.rangeCount) showSelectionPopover(selection.getRangeAt(0));
 }
 
 function bindPanelButtons() {
@@ -439,7 +492,11 @@ function bindEvents() {
   document.querySelectorAll('[data-block]').forEach((block) => {
     const activateBlock = () => {
       state.activeBlockId = block.dataset.block;
-      state.selectedQuote = '';
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed) {
+        state.selectedQuote = '';
+        hideSelectionPopover();
+      }
       document.querySelectorAll('.paragraph').forEach((item) => item.classList.remove('active'));
       block.classList.add('active');
       updateInspector();
@@ -484,6 +541,15 @@ function bindEvents() {
   if (exportReviewButton) exportReviewButton.addEventListener('click', exportReview);
   const exportStaticButton = document.querySelector('#export-static');
   if (exportStaticButton) exportStaticButton.addEventListener('click', exportStaticSite);
+  const selectionPopover = document.querySelector('#selection-popover');
+  if (selectionPopover) selectionPopover.addEventListener('click', openCommentPanelForSelection);
+  if (!selectionListenerBound) {
+    document.addEventListener('selectionchange', () => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed) hideSelectionPopover();
+    });
+    selectionListenerBound = true;
+  }
   updateDirtyDock();
 }
 
@@ -518,6 +584,7 @@ async function editComment(event) {
   await api(`/api/comments/${encodeURIComponent(commentId)}`, { method: 'PATCH', body: JSON.stringify({ note }) });
   state.activeBlockId = comment.blockId;
   state.selectedQuote = '';
+  hideSelectionPopover();
   await load();
   state.activeBlockId = comment.blockId;
   updateInspector();
