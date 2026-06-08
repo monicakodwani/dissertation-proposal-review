@@ -22,6 +22,9 @@ const state = {
 
 const app = document.querySelector('#app');
 let selectionListenerBound = false;
+let autosaveTimer = null;
+let autosaveInFlight = false;
+let autosaveQueued = false;
 
 function readReviewerFeedback() {
   try {
@@ -93,6 +96,25 @@ function normalizeText(value = '') {
   return String(value).replace(/\s+/g, ' ').trim();
 }
 
+function editableText(value = '') {
+  return String(value)
+    .replace(/\r\n/g, '\n')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .trim();
+}
+
+function getSuggestion(blockId) {
+  return state.savedSuggestions.find((suggestion) => suggestion.blockId === blockId && suggestion.type === 'replace');
+}
+
+function getBlockDisplayText(block) {
+  if (Object.prototype.hasOwnProperty.call(state.dirtyBlocks, block.id)) return state.dirtyBlocks[block.id];
+  const suggestion = getSuggestion(block.id);
+  return suggestion ? suggestion.afterPreview : block.text;
+}
+
 function chapterMatches(chapter) {
   const query = state.query.trim().toLowerCase();
   if (!query) return true;
@@ -121,6 +143,7 @@ function blockComments(blockId) {
 }
 
 function setTheme(theme) {
+  collectVisibleEdits();
   state.theme = theme;
   localStorage.setItem('reader-theme', theme);
   render();
@@ -139,6 +162,7 @@ function themeLabel(theme) {
 }
 
 function toggleCollapse(panel) {
+  collectVisibleEdits();
   state.collapsed[panel] = !state.collapsed[panel];
   render();
 }
@@ -219,7 +243,7 @@ function render() {
       <button class="panel-toggle inspector-edge" data-collapse="inspector" title="${state.collapsed.inspector ? 'Show comments' : 'Hide comments'}" aria-label="${state.collapsed.inspector ? 'Show comments' : 'Hide comments'}">${state.collapsed.inspector ? '‹' : '›'}</button>
     </main>
     <button class="selection-popover" id="selection-popover" type="button">Comment</button>
-    <div class="save-dock" id="save-dock"><span id="dirty-count">0 unsaved edits</span><button class="tool-button" id="save-inline-edits">Save text changes</button></div>
+    <div class="save-dock" id="save-dock"><span id="dirty-count">0 edits saving</span><button class="tool-button" id="save-inline-edits">Save now</button></div>
     <div class="toast" id="toast"><span></span></div>
   `;
   bindEvents();
@@ -271,9 +295,10 @@ function renderBlock(block, nextBlock) {
 
   const hasComment = blockComments(block.id).length > 0;
   const isDirty = Object.prototype.hasOwnProperty.call(state.dirtyBlocks, block.id);
+  const displayText = getBlockDisplayText(block);
   return `
     <p class="block paragraph ${block.id === state.activeBlockId ? 'active' : ''} ${hasComment ? 'has-comment' : ''} ${isDirty ? 'dirty' : ''}"
-       id="${block.id}" data-block="${block.id}" data-original="${escapeHtml(normalizeText(block.text))}" contenteditable="true" spellcheck="true">${renderParagraphText(block)}</p>
+       id="${block.id}" data-block="${block.id}" data-original="${escapeHtml(editableText(block.text))}" data-saved="${escapeHtml(editableText(displayText))}" contenteditable="true" spellcheck="true">${renderParagraphText(block, displayText)}</p>
   `;
 }
 
@@ -295,12 +320,12 @@ function renderEmptyHeadingEditor(block) {
   `;
 }
 
-function renderParagraphText(block) {
+function renderParagraphText(block, text = block.text) {
   const comments = blockComments(block.id).filter((comment) => comment.quote);
-  if (!comments.length) return escapeHtml(block.text);
+  if (!comments.length) return escapeHtml(text);
   const ranges = [];
   comments.forEach((comment) => {
-    const index = block.text.indexOf(comment.quote);
+    const index = text.indexOf(comment.quote);
     if (index >= 0) ranges.push({ start: index, end: index + comment.quote.length, comment });
   });
   ranges.sort((a, b) => a.start - b.start || b.end - a.end);
@@ -311,11 +336,11 @@ function renderParagraphText(block) {
   let cursor = 0;
   let html = '';
   kept.forEach((range) => {
-    html += escapeHtml(block.text.slice(cursor, range.start));
-    html += `<mark class="comment-highlight" title="${escapeHtml(range.comment.note)}">${escapeHtml(block.text.slice(range.start, range.end))}</mark>`;
+    html += escapeHtml(text.slice(cursor, range.start));
+    html += `<mark class="comment-highlight" title="${escapeHtml(range.comment.note)}">${escapeHtml(text.slice(range.start, range.end))}</mark>`;
     cursor = range.end;
   });
-  html += escapeHtml(block.text.slice(cursor));
+  html += escapeHtml(text.slice(cursor));
   return html;
 }
 
@@ -418,6 +443,58 @@ function openCommentPanelForSelection() {
   if (noteBox) noteBox.focus();
 }
 
+function updateDirtyBlockFromElement(block) {
+  const blockId = block.dataset.block;
+  const edited = editableText(block.innerText);
+  const saved = editableText(block.dataset.saved || '');
+  if (edited === saved) {
+    delete state.dirtyBlocks[blockId];
+    block.classList.remove('dirty');
+  } else {
+    state.dirtyBlocks[blockId] = edited;
+    block.classList.add('dirty');
+  }
+}
+
+function collectVisibleEdits() {
+  document.querySelectorAll('[data-block]').forEach(updateDirtyBlockFromElement);
+  document.querySelectorAll('[data-insert-after]').forEach((block) => {
+    const text = editableText(block.innerText);
+    if (text) {
+      state.insertBlocks[block.dataset.insertAfter] = text;
+      const shell = block.closest('.empty-editor');
+      if (shell) shell.classList.add('dirty');
+    } else {
+      delete state.insertBlocks[block.dataset.insertAfter];
+      const shell = block.closest('.empty-editor');
+      if (shell) shell.classList.remove('dirty');
+    }
+  });
+}
+
+function scheduleAutosave() {
+  window.clearTimeout(autosaveTimer);
+  autosaveTimer = window.setTimeout(() => saveInlineEdits({ silent: true }), 800);
+}
+
+async function flushAutosave() {
+  collectVisibleEdits();
+  window.clearTimeout(autosaveTimer);
+  await saveInlineEdits({ silent: true });
+}
+
+function upsertSuggestion(suggestion) {
+  const original = editableText((state.content.blocksById[suggestion.blockId] || {}).text || '');
+  state.savedSuggestions = state.savedSuggestions.filter((item) => {
+    if (suggestion.type === 'insert-after') return item.id !== suggestion.id;
+    return item.blockId !== suggestion.blockId || item.type === 'insert-after';
+  });
+  if (editableText(suggestion.afterPreview || '') !== original || suggestion.type === 'insert-after') {
+    state.savedSuggestions.push(suggestion);
+  }
+  saveLocalSuggestions(state.savedSuggestions);
+}
+
 function updateDirtyDock() {
   const dock = document.querySelector('#save-dock');
   const countLabel = document.querySelector('#dirty-count');
@@ -461,7 +538,8 @@ function bindPanelButtons() {
 
 function bindEvents() {
   const searchInput = document.querySelector('#search');
-  if (searchInput) searchInput.addEventListener('input', (event) => {
+  if (searchInput) searchInput.addEventListener('input', async (event) => {
+    await flushAutosave();
     state.query = event.target.value;
     state.activeChapterId = null;
     state.activeBlockId = null;
@@ -470,7 +548,8 @@ function bindEvents() {
   document.querySelectorAll('[data-theme]').forEach((button) => button.addEventListener('click', () => setTheme(button.dataset.theme)));
   bindPanelButtons();
   document.querySelectorAll('[data-chapter]').forEach((button) => {
-    button.addEventListener('click', () => {
+    button.addEventListener('click', async () => {
+      await flushAutosave();
       state.activeChapterId = button.dataset.chapter;
       state.activeBlockId = null;
       state.selectedQuote = '';
@@ -504,22 +583,14 @@ function bindEvents() {
     block.addEventListener('mouseup', () => window.setTimeout(captureSelection, 0));
     block.addEventListener('keyup', captureSelection);
     block.addEventListener('input', () => {
-      const blockId = block.dataset.block;
-      const edited = normalizeText(block.innerText);
-      const original = normalizeText(block.dataset.original || '');
-      if (edited === original) {
-        delete state.dirtyBlocks[blockId];
-        block.classList.remove('dirty');
-      } else {
-        state.dirtyBlocks[blockId] = edited;
-        block.classList.add('dirty');
-      }
+      updateDirtyBlockFromElement(block);
       updateDirtyDock();
+      scheduleAutosave();
     });
   });
   document.querySelectorAll('[data-insert-after]').forEach((block) => {
     block.addEventListener('input', () => {
-      const text = normalizeText(block.innerText);
+      const text = editableText(block.innerText);
       if (text) {
         state.insertBlocks[block.dataset.insertAfter] = text;
         block.closest('.empty-editor').classList.add('dirty');
@@ -528,6 +599,7 @@ function bindEvents() {
         block.closest('.empty-editor').classList.remove('dirty');
       }
       updateDirtyDock();
+      scheduleAutosave();
     });
   });
   const saveCommentButton = document.querySelector('#save-comment');
@@ -646,58 +718,88 @@ async function saveComment() {
   showToast('Comment saved.');
 }
 
-async function saveInlineEdits() {
+async function saveInlineEdits(options = {}) {
+  collectVisibleEdits();
+  const silent = Boolean(options.silent);
   const edits = Object.entries(state.dirtyBlocks);
   const inserts = Object.entries(state.insertBlocks).filter((entry) => entry[1].trim());
-  if (!edits.length && !inserts.length) return showToast('No text changes to save.');
-
-  if (isStaticReview) {
-    const suggestions = [...state.savedSuggestions];
-    edits.forEach(([blockId, raw]) => {
-      const block = state.content.blocksById[blockId] || {};
-      suggestions.push({
-        id: `suggestion-${Date.now()}-${suggestions.length + 1}`,
-        type: raw.trim() ? 'replace' : 'remove',
-        blockId,
-        file: block.file || '',
-        startLine: block.startLine || null,
-        endLine: block.endLine || null,
-        beforePreview: block.text || '',
-        afterPreview: raw,
-        timestamp: new Date().toISOString(),
-      });
-    });
-    inserts.forEach(([blockId, raw]) => {
-      const block = state.content.blocksById[blockId] || {};
-      suggestions.push({
-        id: `suggestion-${Date.now()}-${suggestions.length + 1}`,
-        type: 'insert-after',
-        blockId,
-        file: block.file || '',
-        line: block.endLine || null,
-        afterPreview: raw,
-        timestamp: new Date().toISOString(),
-      });
-    });
-    state.savedSuggestions = suggestions;
-    saveLocalSuggestions(suggestions);
-    state.dirtyBlocks = {};
-    state.insertBlocks = {};
-    updateDirtyDock();
-    showToast('Saved as feedback suggestions. Export when finished.');
+  if (!edits.length && !inserts.length) {
+    if (!silent) showToast('No text changes to save.');
+    return;
+  }
+  if (autosaveInFlight) {
+    autosaveQueued = true;
     return;
   }
 
-  for (const [blockId, raw] of edits) {
-    await api(`/api/blocks/${encodeURIComponent(blockId)}`, { method: 'POST', body: JSON.stringify({ raw }) });
+  autosaveInFlight = true;
+  updateDirtyDock();
+  try {
+    if (isStaticReview) {
+      edits.forEach(([blockId, raw]) => {
+        const block = state.content.blocksById[blockId] || {};
+        upsertSuggestion({
+          id: `suggestion-${blockId}`,
+          type: raw.trim() ? 'replace' : 'remove',
+          blockId,
+          file: block.file || '',
+          startLine: block.startLine || null,
+          endLine: block.endLine || null,
+          beforePreview: block.text || '',
+          afterPreview: raw,
+          timestamp: new Date().toISOString(),
+        });
+      });
+      inserts.forEach(([blockId, raw]) => {
+        const block = state.content.blocksById[blockId] || {};
+        upsertSuggestion({
+          id: `suggestion-insert-${blockId}`,
+          type: 'insert-after',
+          blockId,
+          file: block.file || '',
+          line: block.endLine || null,
+          afterPreview: raw,
+          timestamp: new Date().toISOString(),
+        });
+      });
+    } else {
+      for (const [blockId, raw] of edits) {
+        await api(`/api/blocks/${encodeURIComponent(blockId)}`, { method: 'POST', body: JSON.stringify({ raw }) });
+        const block = state.content.blocksById[blockId];
+        if (block) block.text = raw;
+      }
+      for (const [blockId, raw] of inserts) {
+        await api(`/api/blocks/${encodeURIComponent(blockId)}/insert-after`, { method: 'POST', body: JSON.stringify({ raw }) });
+      }
+    }
+
+    edits.forEach(([blockId, raw]) => {
+      const element = document.getElementById(blockId);
+      if (element) {
+        element.dataset.saved = editableText(raw);
+        element.dataset.original = editableText(raw);
+        element.classList.remove('dirty');
+      }
+    });
+    document.querySelectorAll('[data-insert-after]').forEach((element) => {
+      element.innerText = '';
+      const shell = element.closest('.empty-editor');
+      if (shell) shell.classList.remove('dirty');
+    });
+    state.dirtyBlocks = {};
+    state.insertBlocks = {};
+    updateDirtyDock();
+    if (!silent) showToast(isStaticReview ? 'Feedback suggestions saved.' : 'Text changes saved to LaTeX.');
+  } catch (error) {
+    if (!silent) showToast(error.message || 'Could not save edits.');
+    throw error;
+  } finally {
+    autosaveInFlight = false;
+    if (autosaveQueued) {
+      autosaveQueued = false;
+      scheduleAutosave();
+    }
   }
-  for (const [blockId, raw] of inserts) {
-    await api(`/api/blocks/${encodeURIComponent(blockId)}/insert-after`, { method: 'POST', body: JSON.stringify({ raw }) });
-  }
-  state.dirtyBlocks = {};
-  state.insertBlocks = {};
-  await load();
-  showToast('Text changes saved to LaTeX.');
 }
 
 function downloadText(filename, text) {

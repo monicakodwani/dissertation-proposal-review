@@ -311,6 +311,7 @@ h1 { font-size: 1.38rem; }
   outline: none;
   padding: 8px 10px;
   transition: background 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+  white-space: pre-wrap;
 }
 .paragraph:hover { border-color: var(--line); }
 .paragraph.active, .paragraph:focus { background: transparent; border-color: rgba(39, 111, 115, 0.28); box-shadow: inset 3px 0 0 var(--teal); }
