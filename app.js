@@ -203,7 +203,7 @@ function render() {
         <div class="content-layout">
           <nav class="sections">
             <div class="panel-head"><p class="eyebrow">In This Tab</p></div>
-            ${sectionBlocks.map((block) => `<button class="section-link" data-scroll="${block.id}">${escapeHtml(block.title)}</button>`).join('') || '<p class="quiet">No section headings</p>'}
+            ${sectionBlocks.map((block) => `<button class="section-link section-link-${block.level}" data-scroll="${block.id}">${escapeHtml(block.title)}</button>`).join('') || '<p class="quiet">No section headings</p>'}
           </nav>
           <button class="panel-toggle section-toggle" data-collapse="sections" title="${state.collapsed.sections ? 'Show section list' : 'Hide section list'}" aria-label="${state.collapsed.sections ? 'Show section list' : 'Hide section list'}">${state.collapsed.sections ? '›' : '‹'}</button>
           <article class="paper">
@@ -236,12 +236,10 @@ function renderReviewNotice() {
 
 function renderBlock(block, nextBlock) {
   if (block.type === 'heading') {
-    const emptyHeading = block.level !== 'chapter' && (!nextBlock || nextBlock.type === 'heading');
     return `
       <section class="block heading heading-${block.level}" id="${block.id}">
         <span class="label">${escapeHtml(cleanHeadingLabel(block.level))}</span>
         <h2>${escapeHtml(block.title)}</h2>
-        ${emptyHeading ? renderEmptyHeadingEditor(block) : ''}
       </section>
     `;
   }
@@ -284,7 +282,7 @@ function cleanHeadingLabel(level) {
   if (level === 'section') return 'Section';
   if (level === 'subsection') return 'Subsection';
   if (level === 'subsubsection') return 'Detail';
-  return 'Note';
+  return 'Topic';
 }
 
 function renderEmptyHeadingEditor(block) {
